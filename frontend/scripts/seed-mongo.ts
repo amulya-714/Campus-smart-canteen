@@ -1,6 +1,6 @@
 /**
  * Seeds MongoDB with realistic menu items for 4 stalls.
- * Stall ids 1-4 match db/placeholder_schema.sql.   Run: npm run mongo:seed
+ * Stall ids 1-4 match db/schema.sql.   Run: npm run mongo:seed
  */
 import { getDb, closeMongo } from '../lib/mongo/client';
 import { ensureMongoSetup, MENU } from '../lib/mongo/indexes';
