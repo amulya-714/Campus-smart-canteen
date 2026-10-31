@@ -1,0 +1,46 @@
+{
+  "name": "campusbite",
+  "version": "0.1.0",
+  "private": true,
+  "description": "CampusBite - Smart Canteen Pre-Order and Queue Management (Person 2: menu, app, intelligence)",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "db:setup": "tsx --env-file=.env scripts/setup-postgres.ts",
+    "mongo:seed": "tsx --env-file=.env scripts/seed-mongo.ts",
+    "mongo:explain": "tsx --env-file=.env scripts/explain-mongo.ts",
+    "reconcile": "tsx --env-file=.env scripts/reconcile.ts",
+    "ml:data": ".venv/bin/python ml/generate_synthetic_data.py",
+    "ml:train": ".venv/bin/python ml/train_model.py",
+    "ml:predict": ".venv/bin/python ml/predict.py",
+    "ml:test": ".venv/bin/python -m pytest ml/tests -q",
+    "setup": "npm run db:setup && npm run mongo:seed && npm run ml:data && npm run ml:train",
+    "test:all": "npm test && npm run ml:test",
+    "test:postgres": "DATABASE_URL=postgresql://localhost/campus_smart_canteen_test vitest run tests/postgres-adapter.test.ts"
+  },
+  "dependencies": {
+    "@fontsource-variable/bricolage-grotesque": "^5.1.0",
+    "@fontsource-variable/figtree": "^5.1.0",
+    "bcryptjs": "^2.4.3",
+    "jose": "^5.9.6",
+    "mongodb": "^6.10.0",
+    "next": "14.2.35",
+    "pg": "^8.13.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+    "@types/node": "^20.17.0",
+    "@types/pg": "^8.11.10",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.8"
+  }
+}
