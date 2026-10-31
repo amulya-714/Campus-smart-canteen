@@ -99,24 +99,120 @@ export interface StockLine { menuItemId: string; quantity: number }
  * If any line fails, the lines already taken are given back (all-or-nothing).
  * Returns the id of the line that failed, or null on success.
  */
-export async function reserveStock(lines: StockLine[]): Promise<string | null> {
+
+const stockOperationId = (
+  action: 'reserve' | 'release',
+  requestId: string,
+  menuItemId: string,
+) => `${action}:${encodeURIComponent(requestId)}:${menuItemId}`;
+
+/**
+ * Reserves stock one menu item at a time.
+ * Each stock change and its operation ID are stored atomically
+ * on the same MongoDB document.
+ *
+ * Returns the failed item ID, or null on success.
+ */
+export async function reserveStock(
+  lines: StockLine[],
+  requestId: string,
+): Promise<string | null> {
   const c = await col();
   const taken: StockLine[] = [];
+
   for (const l of lines) {
-    const r = await c.updateOne(
-      { _id: new ObjectId(l.menuItemId), is_available: true, stock: { $gte: l.quantity } },
-      { $inc: { stock: -l.quantity }, $set: { updated_at: new Date() } });
-    if (r.modifiedCount !== 1) {
-      await releaseStock(taken);
+    const id = new ObjectId(l.menuItemId);
+    const reserveOp = stockOperationId('reserve', requestId, l.menuItemId);
+    const releaseOp = stockOperationId('release', requestId, l.menuItemId);
+
+    const existing = await c.findOne(
+      { _id: id },
+      { projection: { stock_operations: 1 } },
+    );
+
+    const operations: string[] = existing?.stock_operations ?? [];
+
+    // A previous reservation was already restored: do not reserve again.
+    if (operations.includes(releaseOp)) {
+      await releaseStock(taken, requestId);
       return l.menuItemId;
     }
+
+    // A retry of an active reservation must not deduct stock twice.
+    if (operations.includes(reserveOp)) {
+      taken.push(l);
+      continue;
+    }
+
+    const result = await c.updateOne(
+      {
+        _id: id,
+        is_available: true,
+        stock: { $gte: l.quantity },
+        stock_operations: { $nin: [reserveOp, releaseOp] },
+      },
+      {
+        $inc: { stock: -l.quantity },
+        $addToSet: { stock_operations: reserveOp },
+        $set: { updated_at: new Date() },
+      },
+    );
+
+    if (result.modifiedCount !== 1) {
+      // Check whether a concurrent retry completed this same reservation.
+      const latest = await c.findOne(
+        { _id: id },
+        { projection: { stock_operations: 1 } },
+      );
+      const latestOps: string[] = latest?.stock_operations ?? [];
+
+      if (latestOps.includes(reserveOp) && !latestOps.includes(releaseOp)) {
+        taken.push(l);
+        continue;
+      }
+
+      // Only undo reservations that this request actually made.
+      await releaseStock(taken, requestId);
+      return l.menuItemId;
+    }
+
     taken.push(l);
   }
+
   return null;
 }
 
-export async function releaseStock(lines: StockLine[]): Promise<void> {
+/**
+ * Restores only stock previously reserved by this request.
+ * The stock increment and release-operation ID are applied
+ * atomically, preventing repeated calls from incrementing twice.
+ */
+export async function releaseStock(
+  lines: StockLine[],
+  requestId: string,
+): Promise<void> {
   if (!lines.length) return;
+
   const c = await col();
-  await Promise.all(lines.map((l) => c.updateOne({ _id: new ObjectId(l.menuItemId) }, { $inc: { stock: l.quantity } })));
+
+  for (const l of lines) {
+    const id = new ObjectId(l.menuItemId);
+    const reserveOp = stockOperationId('reserve', requestId, l.menuItemId);
+    const releaseOp = stockOperationId('release', requestId, l.menuItemId);
+
+    await c.updateOne(
+      {
+        _id: id,
+        $and: [
+          { stock_operations: reserveOp },
+          { stock_operations: { $ne: releaseOp } },
+        ],
+      },
+      {
+        $inc: { stock: l.quantity },
+        $addToSet: { stock_operations: releaseOp },
+        $set: { updated_at: new Date() },
+      },
+    );
+  }
 }
