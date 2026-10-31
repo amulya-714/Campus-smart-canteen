@@ -1,6 +1,8 @@
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { Pool } from 'pg';
 import { PersonOneAdapter } from '../lib/postgres/personOneAdapter';
 import type { CreateOrderInput } from '../lib/postgres/types';
@@ -124,6 +126,10 @@ async function createTestOrder(
 }
 
 beforeAll(async () => {
+  // Always test against the current schema (idempotent; also upgrades a database that was
+  // created from the old placeholder schema, so the DB-level constraint tests can't hit a stale one).
+  await sql.query(readFileSync(join(__dirname, '..', 'db', 'schema.sql'), 'utf8'));
+
   const suffix = randomUUID();
 
   const stall = await sql.query(
@@ -494,6 +500,7 @@ describe('PostgreSQL adapter transaction safety', () => {
         ),
       ).rejects.toThrow(/orders_slot_stall_fk/);
     } finally {
+      await sql.query('DELETE FROM orders WHERE stall_id = $1', [otherStallId]);
       await sql.query('DELETE FROM stalls WHERE stall_id = $1', [otherStallId]);
     }
   });
