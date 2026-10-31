@@ -1,6 +1,6 @@
 /**
  * PLACEHOLDER adapter -- Person 1 will replace this (or re-implement the same methods).
- * It is written against db/placeholder_schema.sql and is just good enough to
+ * It is written against db/schema.sql and is just good enough to
  * demo and test Person 2's part locally. The interesting concurrency logic
  * (row locking, isolation levels, triggers) is Person 1's job; the version
  * here uses a simple SELECT ... FOR UPDATE inside one transaction.

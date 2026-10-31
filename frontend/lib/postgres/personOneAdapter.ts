@@ -18,6 +18,13 @@ import {
 
 type Queryable = Pick<PoolClient, 'query'>;
 
+// target status -> the only status it may be reached from (forward-only workflow)
+const REQUIRED_PREVIOUS_STATUS: Partial<Record<OrderStatus, OrderStatus>> = {
+  PREPARING: 'PLACED',
+  READY: 'PREPARING',
+  COMPLETED: 'READY',
+};
+
 const toUser = (r: any): User => ({
   id: Number(r.user_id),
   name: r.name,
@@ -315,6 +322,16 @@ export class PersonOneAdapter implements PgAdapter {
       );
       const slot = slotResult.rows[0];
 
+      // Re-check idempotency now that we hold the slot lock. If an identical request
+      // was in flight, it has committed by the time we get here (READ COMMITTED sees it),
+      // and this retry must get that order back, not SlotFullError for a slot the
+      // original request just filled.
+      const duplicate = await orderByRequestId(client, input.requestId);
+      if (duplicate) {
+        await client.query('COMMIT');
+        return duplicate;
+      }
+
       if (
         !slot ||
         Number(slot.stall_id) !== input.stallId ||
@@ -430,7 +447,7 @@ export class PersonOneAdapter implements PgAdapter {
       );
       await client.query(
         `UPDATE pickup_slots
-         SET booked_count = GREATEST(booked_count - 1, 0)
+         SET booked_count = booked_count - 1
          WHERE slot_id = $1`,
         [order.slot_id],
       );
@@ -487,16 +504,25 @@ export class PersonOneAdapter implements PgAdapter {
     return result.rows.map(toOrder);
   }
 
+  /**
+   * Staff status changes move forward one step at a time. The previous status is part of
+   * the UPDATE's WHERE clause, so the check and the write are one atomic statement:
+   * a concurrent cancel cannot be overwritten, and a CANCELLED order cannot be revived.
+   * CANCELLED is deliberately not accepted here: use cancelOrder(), which also frees the slot.
+   * Returns null when the order doesn't exist, belongs to another stall, or is not in the
+   * status this change requires.
+   */
   async updateOrderStatus(orderId: number, status: OrderStatus, stallId?: number) {
-    // A stall-scoped caller cannot update another stall's order.
-    const params: (number | string)[] = [orderId, status];
-    const stallFilter = stallId !== undefined ? 'AND stall_id = $3' : '';
+    const required = REQUIRED_PREVIOUS_STATUS[status];
+    if (!required) return null;
+
+    const params: (number | string)[] = [orderId, status, required];
     if (stallId !== undefined) params.push(stallId);
 
     const result = await pool().query(
       `UPDATE orders
        SET status = $2, updated_at = now()
-       WHERE order_id = $1 ${stallFilter}
+       WHERE order_id = $1 AND status = $3 ${stallId !== undefined ? 'AND stall_id = $4' : ''}
        RETURNING order_id`,
       params,
     );

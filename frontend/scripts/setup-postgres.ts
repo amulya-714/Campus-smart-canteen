@@ -1,7 +1,6 @@
 /**
- * Creates the PLACEHOLDER tables, generates pickup slots, and adds demo users.
+ * Creates the PostgreSQL schema (db/schema.sql), generates pickup slots, and adds demo users.
  * Run: npm run db:setup     (create the database first:  createdb campusbite)
- * If Person 1's schema is in place, skip this and just run their setup.
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -18,9 +17,9 @@ const DEMO = [
 ];
 
 async function main() {
-  const sql = readFileSync(join(__dirname, '..', 'db', 'placeholder_schema.sql'), 'utf8');
+  const sql = readFileSync(join(__dirname, '..', 'db', 'schema.sql'), 'utf8');
   await pool().query(sql);
-  const n = await pool().query('SELECT placeholder_generate_slots(2) AS n');
+  const n = await pool().query('SELECT generate_pickup_slots(2) AS n');
   console.log(`Schema ready. Created ${n.rows[0].n} new pickup slots.`);
   for (const u of DEMO) {
     if (await db.findUserByEmail(u.email)) continue;

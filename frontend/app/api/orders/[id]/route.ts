@@ -16,7 +16,10 @@ export const PATCH = withAuth<{ id: string }>(['staff', 'admin'], async (req, { 
   if (!order) throw new ApiError(404, 'Order not found');
   assertStallAccess(session, order.stallId);
   if (!NEXT[order.status].includes(status)) throw new ApiError(409, `Cannot move an order from ${order.status} to ${status}`);
-  return json({ order: await db.updateOrderStatus(order.id, status, session.role === 'staff' ? session.stallId ?? undefined : undefined) });
+  const updated = await db.updateOrderStatus(order.id, status, session.role === 'staff' ? session.stallId ?? undefined : undefined);
+  // The adapter re-checks the transition atomically; null means the order changed since we read it.
+  if (!updated) throw new ApiError(409, 'Order status changed; refresh and try again');
+  return json({ order: updated });
 });
 
 export const dynamic = 'force-dynamic'; // never prerender/cache API responses
