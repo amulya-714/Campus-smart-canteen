@@ -366,4 +366,135 @@ describe('PostgreSQL adapter transaction safety', () => {
 
     expect(Number(slot.rows[0].booked_count)).toBe(0);
   });
+
+  // ---------------------------------------------------------------------
+  // Status workflow, retry race, and database-level integrity
+  // ---------------------------------------------------------------------
+
+  async function bookedCount(slot: number) {
+    const r = await sql.query('SELECT booked_count FROM pickup_slots WHERE slot_id = $1', [slot]);
+    return Number(r.rows[0].booked_count);
+  }
+
+  it('moves status forward one step at a time and rejects skips and backward moves', async () => {
+    const slot = await makeSlot(2);
+    const order = await createTestOrder(randomUUID(), studentId!, slot);
+
+    expect(await db.updateOrderStatus(order.id, 'READY')).toBeNull(); // skips PREPARING
+    expect(await db.updateOrderStatus(order.id, 'PLACED')).toBeNull(); // not a valid target
+    expect((await db.updateOrderStatus(order.id, 'PREPARING'))?.status).toBe('PREPARING');
+    expect((await db.updateOrderStatus(order.id, 'READY'))?.status).toBe('READY');
+    expect((await db.updateOrderStatus(order.id, 'COMPLETED'))?.status).toBe('COMPLETED');
+    expect(await db.updateOrderStatus(order.id, 'PREPARING')).toBeNull(); // no going back
+    expect((await db.getOrder(order.id))?.status).toBe('COMPLETED');
+  });
+
+  it('does not accept CANCELLED via updateOrderStatus and cannot revive a cancelled order', async () => {
+    const slot = await makeSlot(2);
+    const order = await createTestOrder(randomUUID(), studentId!, slot);
+
+    // Would leak capacity if allowed: the slot would still count this order.
+    expect(await db.updateOrderStatus(order.id, 'CANCELLED')).toBeNull();
+    expect((await db.getOrder(order.id))?.status).toBe('PLACED');
+    expect(await bookedCount(slot)).toBe(1);
+
+    await db.cancelOrder(order.id, studentId!);
+    expect(await db.updateOrderStatus(order.id, 'PREPARING')).toBeNull();
+    expect((await db.getOrder(order.id))?.status).toBe('CANCELLED');
+    expect(await bookedCount(slot)).toBe(0);
+  });
+
+  it('ignores status updates scoped to a different stall', async () => {
+    const slot = await makeSlot(2);
+    const order = await createTestOrder(randomUUID(), studentId!, slot);
+
+    expect(await db.updateOrderStatus(order.id, 'PREPARING', stallId! + 100000)).toBeNull();
+    expect((await db.getOrder(order.id))?.status).toBe('PLACED');
+    expect((await db.updateOrderStatus(order.id, 'PREPARING', stallId!))?.status).toBe('PREPARING');
+  });
+
+  it('keeps slot count and order status consistent when staff update races a student cancel', async () => {
+    for (let i = 0; i < 15; i++) {
+      const slot = await makeSlot(2);
+      const order = await createTestOrder(randomUUID(), studentId!, slot);
+
+      await Promise.allSettled([
+        db.updateOrderStatus(order.id, 'PREPARING'),
+        db.cancelOrder(order.id, studentId!),
+      ]);
+
+      const final = (await db.getOrder(order.id))!;
+      const booked = await bookedCount(slot);
+      // Either the cancel won (CANCELLED, slot freed) or the update won (cancel refused, slot kept).
+      if (final.status === 'CANCELLED') expect(booked).toBe(0);
+      else {
+        expect(final.status).toBe('PREPARING');
+        expect(booked).toBe(1);
+      }
+    }
+  });
+
+  it('returns the original order for a retry that was waiting on the slot lock when the slot filled', async () => {
+    const slot = await makeSlot(1);
+    const requestId = randomUUID();
+    createdRequestIds.push(requestId);
+
+    // Simulate request A mid-flight: it holds the slot lock and has not committed yet.
+    const a = await sql.connect();
+    try {
+      await a.query('BEGIN');
+      await a.query('SELECT 1 FROM pickup_slots WHERE slot_id = $1 FOR UPDATE', [slot]);
+
+      // Request B (same request id) starts: its first idempotency check finds nothing,
+      // then it blocks on the slot lock.
+      const retry = db.createOrder(makeOrderInput(requestId, studentId!, slot));
+      await new Promise((r) => setTimeout(r, 400));
+
+      // A finishes: order exists and the capacity-1 slot is now full.
+      const inserted = await a.query(
+        `INSERT INTO orders (client_request_id, student_id, stall_id, slot_id, total_amount)
+         VALUES ($1, $2, $3, $4, 55) RETURNING order_id`,
+        [requestId, studentId, stallId, slot],
+      );
+      await a.query('UPDATE pickup_slots SET booked_count = booked_count + 1 WHERE slot_id = $1', [slot]);
+      await a.query('COMMIT');
+
+      const order = await retry; // must NOT throw SlotFullError
+      expect(order.id).toBe(Number(inserted.rows[0].order_id));
+      expect(await bookedCount(slot)).toBe(1);
+    } finally {
+      await a.query('ROLLBACK').catch(() => undefined);
+      a.release();
+    }
+  });
+
+  it('database rejects invalid status transitions even for direct SQL', async () => {
+    const slot = await makeSlot(2);
+    const order = await createTestOrder(randomUUID(), studentId!, slot);
+    await db.cancelOrder(order.id, studentId!);
+
+    await expect(
+      sql.query("UPDATE orders SET status = 'PREPARING' WHERE order_id = $1", [order.id]),
+    ).rejects.toThrow(/Invalid order status transition/);
+  });
+
+  it('database rejects an order whose slot belongs to a different stall', async () => {
+    const other = await sql.query(
+      `INSERT INTO stalls (name, location, description) VALUES ($1, 'x', 'x') RETURNING stall_id`,
+      [`Other Stall ${randomUUID()}`],
+    );
+    const otherStallId = Number(other.rows[0].stall_id);
+    try {
+      const slot = await makeSlot(2); // belongs to stallId
+      await expect(
+        sql.query(
+          `INSERT INTO orders (client_request_id, student_id, stall_id, slot_id, total_amount)
+           VALUES ($1, $2, $3, $4, 10)`,
+          [randomUUID(), studentId, otherStallId, slot],
+        ),
+      ).rejects.toThrow(/orders_slot_stall_fk/);
+    } finally {
+      await sql.query('DELETE FROM stalls WHERE stall_id = $1', [otherStallId]);
+    }
+  });
 });

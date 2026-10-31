@@ -1,8 +1,11 @@
 -- =====================================================================
--- PLACEHOLDER SCHEMA  --  *** Person 1 will replace this ***
--- Only the minimum tables Person 2's code needs to run locally.
--- Person 1's real schema (constraints, triggers, locking, isolation levels)
--- goes elsewhere; see docs/INTEGRATION_CONTRACT.md for what must stay compatible.
+-- CampusBite PostgreSQL schema (Person 1)
+-- Safe to re-run: every statement is idempotent (IF NOT EXISTS / guarded).
+-- Integrity rules enforced IN THE DATABASE, not only in application code:
+--   * booked_count never exceeds capacity or goes negative (CHECK)
+--   * an order's slot must belong to the order's stall (composite FK)
+--   * client_request_id is unique (idempotent checkout)
+--   * order status can only move along the allowed workflow (trigger)
 -- =====================================================================
 
 CREATE TABLE IF NOT EXISTS stalls (
@@ -35,7 +38,9 @@ CREATE TABLE IF NOT EXISTS pickup_slots (
   capacity     INT NOT NULL DEFAULT 15 CHECK (capacity > 0),
   booked_count INT NOT NULL DEFAULT 0,
   CHECK (booked_count >= 0 AND booked_count <= capacity),   -- DB-level overbooking guard
-  UNIQUE (stall_id, slot_start)
+  UNIQUE (stall_id, slot_start),
+  CONSTRAINT pickup_slots_slot_stall_uq UNIQUE (slot_id, stall_id),
+  CHECK (slot_end > slot_start)
 );
 
 CREATE TABLE IF NOT EXISTS orders (
@@ -43,12 +48,13 @@ CREATE TABLE IF NOT EXISTS orders (
   client_request_id TEXT NOT NULL UNIQUE,           -- idempotency key (see CONSISTENCY_DESIGN.md)
   student_id        INT NOT NULL REFERENCES users(user_id),
   stall_id          INT NOT NULL REFERENCES stalls(stall_id),
-  slot_id           INT NOT NULL REFERENCES pickup_slots(slot_id),
+  slot_id           INT NOT NULL,
   status            TEXT NOT NULL DEFAULT 'PLACED'
                     CHECK (status IN ('PLACED','PREPARING','READY','COMPLETED','CANCELLED')),
   total_amount      NUMERIC(10,2) NOT NULL CHECK (total_amount >= 0),
   created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+  updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT orders_slot_stall_fk FOREIGN KEY (slot_id, stall_id) REFERENCES pickup_slots (slot_id, stall_id)
 );
 
 CREATE TABLE IF NOT EXISTS order_items (
@@ -77,7 +83,7 @@ SELECT * FROM (VALUES
 WHERE NOT EXISTS (SELECT 1 FROM stalls);
 
 -- Generates 10-minute pickup windows (9:00-16:50) for today + N days, capacity 15 each.
-CREATE OR REPLACE FUNCTION placeholder_generate_slots(days_ahead INT DEFAULT 2) RETURNS INT AS $$
+CREATE OR REPLACE FUNCTION generate_pickup_slots(days_ahead INT DEFAULT 2) RETURNS INT AS $$
 DECLARE n INT;
 BEGIN
   INSERT INTO pickup_slots (stall_id, slot_start, slot_end, capacity)
@@ -91,3 +97,47 @@ BEGIN
   GET DIAGNOSTICS n = ROW_COUNT;
   RETURN n;
 END $$ LANGUAGE plpgsql;
+
+-- Kept so lib/postgres/placeholderAdapter.ts (legacy) still works.
+CREATE OR REPLACE FUNCTION placeholder_generate_slots(days_ahead INT DEFAULT 2) RETURNS INT AS $$
+  SELECT generate_pickup_slots(days_ahead)
+$$ LANGUAGE sql;
+
+-- ---------------------------------------------------------------------
+-- Upgrade path for databases created from the old placeholder schema
+-- (CREATE TABLE IF NOT EXISTS will not alter existing tables).
+-- ---------------------------------------------------------------------
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'pickup_slots_slot_stall_uq') THEN
+    ALTER TABLE pickup_slots ADD CONSTRAINT pickup_slots_slot_stall_uq UNIQUE (slot_id, stall_id);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'orders_slot_stall_fk') THEN
+    ALTER TABLE orders ADD CONSTRAINT orders_slot_stall_fk
+      FOREIGN KEY (slot_id, stall_id) REFERENCES pickup_slots (slot_id, stall_id);
+  END IF;
+END $$;
+
+-- ---------------------------------------------------------------------
+-- Status workflow guard.
+--   PLACED -> PREPARING -> READY -> COMPLETED
+--   PLACED -> CANCELLED   (student cancel; the app also releases the slot in the same transaction)
+-- Anything else (e.g. reviving a CANCELLED order, skipping steps) is rejected by the database.
+-- ---------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION enforce_order_status_transition() RETURNS trigger AS $$
+BEGIN
+  IF NEW.status IS DISTINCT FROM OLD.status AND NOT (
+       (OLD.status = 'PLACED'    AND NEW.status IN ('PREPARING', 'CANCELLED')) OR
+       (OLD.status = 'PREPARING' AND NEW.status = 'READY') OR
+       (OLD.status = 'READY'     AND NEW.status = 'COMPLETED')
+     ) THEN
+    RAISE EXCEPTION 'Invalid order status transition % -> %', OLD.status, NEW.status
+      USING ERRCODE = 'check_violation';
+  END IF;
+  RETURN NEW;
+END $$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_orders_status_transition ON orders;
+CREATE TRIGGER trg_orders_status_transition
+  BEFORE UPDATE OF status ON orders
+  FOR EACH ROW EXECUTE FUNCTION enforce_order_status_transition();

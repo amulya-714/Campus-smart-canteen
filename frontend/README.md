@@ -32,7 +32,7 @@ flowchart LR
 | Student / staff / admin UI | ✅ | |
 | Order saga (cross-DB consistency) | ✅ | shared (the Postgres side) |
 | ML forecasting + demand-aware ranking | ✅ | |
-| PostgreSQL schema, constraints, triggers | placeholder only (`db/placeholder_schema.sql`) | ✅ |
+| PostgreSQL schema, constraints, triggers | `db/schema.sql` + `lib/postgres/personOneAdapter.ts` | ✅ |
 | Slot booking: transactions, row locks, isolation levels | placeholder only | ✅ |
 | Postgres query optimization (EXPLAIN ANALYZE), concurrency tests | | ✅ |
 | End-to-end testing | shared: [checklist](docs/INTEGRATION_CONTRACT.md#5-shared-end-to-end-test-checklist-do-together) | shared |
@@ -47,7 +47,7 @@ lib/mongo/           client, schemas+validator, indexes, menuRepo, sagaRepo
 lib/postgres/        ★ PgAdapter interface + placeholder adapter (Person 1 swaps here)
 lib/services/        orderSaga, ranking, forecast bridge
 ml/                  synthetic data, training, prediction, pytest tests
-db/                  placeholder_schema.sql  (Person 1 replaces)
+db/                  schema.sql  (PostgreSQL schema, constraints, status trigger)
 scripts/             seed-mongo, explain-mongo, setup-postgres, reconcile
 docs/                INTEGRATION_CONTRACT · CONSISTENCY_DESIGN · VIVA_NOTES
 tests/               vitest: auth, menu APIs, saga, ranking
