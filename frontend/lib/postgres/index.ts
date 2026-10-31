@@ -1,10 +1,11 @@
 /**
- * >>> THE ONE SWAP POINT <<<
- * Everything in the app imports `db` from here. To use Person 1's real
- * implementation, change the single line below to their adapter class.
+ * Everything in the app imports `db` from here.
+ * Use PersonOneAdapter for the real PostgreSQL implementation.
  */
-import type { PgAdapter } from './types';
-import { PlaceholderPgAdapter } from './placeholderAdapter';
 
-export const db: PgAdapter = new PlaceholderPgAdapter();
+import type { PgAdapter } from './types';
+import { PersonOneAdapter } from './personOneAdapter';
+
+export const db: PgAdapter = new PersonOneAdapter();
+
 export * from './types';
