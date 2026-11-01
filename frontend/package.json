@@ -12,6 +12,7 @@
     "db:setup": "tsx --env-file=.env scripts/setup-postgres.ts",
     "mongo:seed": "tsx --env-file=.env scripts/seed-mongo.ts",
     "mongo:explain": "tsx --env-file=.env scripts/explain-mongo.ts",
+    "pg:explain": "tsx --env-file=.env scripts/explain-postgres.ts",
     "reconcile": "tsx --env-file=.env scripts/reconcile.ts",
     "ml:data": ".venv/bin/python ml/generate_synthetic_data.py",
     "ml:train": ".venv/bin/python ml/train_model.py",
